@@ -1,13 +1,18 @@
-import cv2
-import numpy as np
 import math
+import random
 #from matplotlib import pyplot as plt
 
 class ImageMatcher():
     def __init__(self, query, db):
         print "Loading images"
-        self.db = cv2.cvtColor(cv2.imread(db), cv2.COLOR_BGR2GRAY)
-        self.query = cv2.cvtColor(cv2.imread(query), cv2.COLOR_BGR2GRAY)
+        self.db_img = cv2.imread(db)
+        self.query_img = cv2.imread(query)
+
+        print "DB dimension: ", self.db_img.shape
+        print "Query dimension: ", self.query_img.shape
+
+        self.db = cv2.cvtColor(self.db_img, cv2.COLOR_BGR2GRAY)
+        self.query = cv2.cvtColor(self.query_img, cv2.COLOR_BGR2GRAY)
 
         # init sift
         self.sift = cv2.SIFT()
@@ -61,7 +66,7 @@ class ImageMatcher():
         best_ratio = np.amin(ratio)
         
         # indicies of base keypoints 
-        retained_indicies = np.where(ratio < 0.75)[0]
+        retained_indicies = np.where(ratio < 0.85)[0]
 
         # indicies of query keypoints 
         matched_indicies = best_match_idx[retained_indicies]
@@ -70,42 +75,85 @@ class ImageMatcher():
         query_kp = map(self.query_kp[0].__getitem__, matched_indicies)
         base_kp = map(self.db_kp[0].__getitem__, retained_indicies)
 
+
         # this is the lib call to compute homography
         src = np.float32([ m.pt for m in query_kp]).reshape(-1,1,2)
         dst = np.float32([ m.pt for m in base_kp]).reshape(-1,1,2)
-        M, mask = cv2.findHomography(src, dst, cv2.RANSAC, 5.0)
+        M, mask = cv2.findHomography(src, dst, cv2.RANSAC, 1)
 
-        print "M is ", M
-        self.get_perc_inliners(base_kp, query_kp, M)
-        inp = cv2.imread('toy.jpg')
-        transformed = cv2.warpPerspective(inp, M, (10000, 10000))
-        cv2.imwrite('transformed.jpg', transformed)
+        print "Homography matrix is: ", M
+        print "Homography[0][1] matrix is: ", M[0][1]
+
+        # transform  
+        (w, h, _)  = self.db_img.shape
+
+        pts = np.float32([ [0,0],[0,h-1],[w-1,h-1],[w-1,0] ]).reshape(-1,1,2)
+        dst = cv2.perspectiveTransform(pts,M)
+
+        self.result = cv2.polylines(self.query_img, [np.int32(dst)],True,255,3)
+        print self.result
+        cv2.imwrite('testimg.jpg', self.query_img)
+        
+        retained_tuples = sorted([(x, ratio[x]) for x in retained_indicies], key = lambda x: x[1])
+        print "Best ratio was: ", best_ratio
+
+        #print "M is ", M
+        #self.get_perc_inliners(base_kp, query_kp, M)
+        #inp = cv2.imread('toy.jpg')
+        #transformed = cv2.warpPerspective(inp, M, (10000, 10000))
+        #cv2.imwrite('transformed.jpg', transformed)
 
         #af = cv2.getPerspectiveTransform(src, dst)
         #print "PERS is ", af
-        H = self.compute_homography(base_kp[:4], query_kp[:4])
-        
-        print "Sample keypoint location is ", query_kp[0].pt
-        print "Matched keypoints ", len(query_kp), ' vs ', len (base_kp)
-        print "Query keypoints dim is: ", len(query_kp)
+        #M = self.RANSAC(base_kp, query_kp, 3)
 
-        retained_tuples = sorted([(x, ratio[x]) for x in retained_indicies], key = lambda x: x[1])
-        print "Best ratio was: ", best_ratio
 
         im = cv2.drawKeypoints(self.query, query_kp)
         cv2.imwrite('sift_keypoints.jpg',im)
 
-    def RANSAC(self, effort=1):
+    def RANSAC(self, db_kp, query_kp, effort=2):
         # first pick random 4 points
-
+        random.seed()
+        current_best_perc = 0
+        current_best_indx = []
+        current_best_M = []
+        current_iteration = 1
+        # keep n iterations < 10^5, default is 2
+        effort = min(effort, 5)
+        print "RANSAC with effor: ", effort
+        max_iteration = 10 ** effort
         # then compute the homography
-
-        # check the # of inliners
-
-        # repeat
-
+        total_iterations = len(query_kp) ** 4
+        current_iteration = 1
+        for idx1 in xrange(len(query_kp)):
+            for idx2 in xrange(idx1 + 1, len(query_kp)):
+                for idx3 in xrange(idx2 + 1, len(query_kp)):
+                    for idx4 in xrange(idx3 + 1, len(query_kp)):
+                        random_samples = [idx1, idx2, idx3, idx4]
+                        selected_db_kp = [db_kp[idx] for idx in random_samples]
+                        selected_query_kp = [query_kp[idx] for idx in random_samples]
+                        # check the # of inliners
+                        M, perc = self.compute_homography(selected_db_kp, selected_query_kp, db_kp, query_kp, 150)
+                        if perc > current_best_perc:
+                            current_best_perc = perc
+                            current_best_indx = random_samples
+                            current_best_M = M
+                        if current_iteration % 1000 == 0: 
+                            print "RANSAC %", 1.0 * current_iteration/ total_iterations," %inlier=", perc, " best is: ", current_best_perc
+                        current_iteration += 1
+                        # repeat
+    
         # return the best homography
-        return 
+        print "Best M is: ", M, " with %inlier ", current_best_perc
+        return M
+
+    def transform_corners(self, M, topleft, topright, bottomleft, bottomright):
+        tl = self.transform(topleft, M)
+        tr = self.transform(topright, M)
+        bl = self.transform(bottomleft, M)
+        br = self.transform(bottomright, M)
+        return (tl, tr, bl, br)
+        
 
     def _compute_component(self, db_kp, query_kp):
         """
@@ -113,7 +161,9 @@ class ImageMatcher():
         
         [x y 1 0 0 0 -x'x -x'y -x']
         [0 0 0 x y 1 -y'x -y'y -y']
+
         """
+        # TODO: NEED TO VERIFY THIS
         kp_arr = np.zeros(shape=(2, 9))
         (y, x) = query_kp.pt
         (y_p, x_p) = db_kp.pt
@@ -133,7 +183,7 @@ class ImageMatcher():
         kp_arr[1][8] = -1.0 * y_p
         return kp_arr
 
-    def compute_homography(self, db_kp, query_kp):
+    def compute_homography(self, db_kp, query_kp, test_db_kp, test_query_kp, thresh=1000):
         """
         Compute the linear homogeneous homography
         from query_kp to db_kp
@@ -161,10 +211,8 @@ class ImageMatcher():
         H = np.dot(H.T, H)
         (val, vec) = np.linalg.eig(H)
         M = vec[np.argmin(val)].reshape(3,3)
-        print "M2 is ", M
-        perc = self.get_perc_inliners(db_kp, query_kp, M)
-        print "Perc. inliers is ", perc
-        return M
+        perc = self.get_perc_inliners(test_db_kp, test_query_kp ,M, thresh)
+        return (M, perc)
 
     def get_pt(self, kp):
         return [item.pt for item in kp]
@@ -175,12 +223,14 @@ class ImageMatcher():
         under homography M
         """
         (y, x) = src
-        base = M[2][0]*x + M[2][1]*y + M[2][2]
-        x_p = (M[0][0]*x + M[0][1]*y + M[0][2])/base
-        y_p = (M[1][0]*x + M[1][1]*y + M[1][2])/base
+        #dest(x) = [M11x + M12y + M13]/[M31x + M32y + M33]
+        #dest(y) = [M21x + M22y + M23]/[M31x + M32y + M33]
+        print "The transformation matrix is: ", M
+        x_p = (M[0][0]*x + M[0][1]*y + M[0][2]) / (M[2][0]*x + M[2][1]*y + M[2][2])
+        y_p = (M[1][0]*x + M[1][1]*y + M[1][2]) / (M[2][0]*x + M[2][1]*y + M[2][2])
         return (y_p, x_p)
 
-    def get_perc_inliners(self, db_kp, query_kp, M, thresh=300):
+    def get_perc_inliners(self, db_kp, query_kp, M, thresh=1000):
         """
         Get the percentage of inliers from query_kp to db_kp
         under homographic transformation M. Inliers are points 
@@ -199,13 +249,20 @@ class ImageMatcher():
         
         for i in xrange(len(transformed_query)):
             euclid = (db_coords[i][0] - transformed_query[i][0])**2 + (db_coords[i][1] - transformed_query[i][1])**2 
-            euclid = math.sqrt(euclid)
+            try:
+                euclid = math.sqrt(euclid)
+            except ValueError:
+                print "VALUE ERROR: Trying to take sqrt of ", euclid
+                euclid = thresh + 1
             if euclid <= thresh:
-                print "Transformed: ", transformed_query[i], " actual ", db_coords[i], " eucl. dist. ", euclid
+                #print "Transformed: ", transformed_query[i], " actual ", db_coords[i], " eucl. dist. ", euclid
                 inliner += 1
-        return 1.0 * inliner / total
+        return 100.0 * inliner / total * 1.0
 
 if __name__ == '__main__':
+    print "Importing numpy and cv2..."
+    import cv2
+    import numpy as np
     im = ImageMatcher("09.jpg", 'toy.jpg')
     im.compute_keypoints()
     im.get_euclidian()
